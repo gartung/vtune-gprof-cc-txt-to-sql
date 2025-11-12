@@ -70,11 +70,25 @@ def infer_column_types(headers: List[str]) -> Dict[str, str]:
 
 def create_table(conn: sqlite3.Connection, table: str, headers: List[str], column_types: Dict[str, str]):
     # Quote identifiers safely with double-quotes
-    # Add parent_index column to track parent-child relationships
     cols = ", ".join(f'"{h}" {column_types.get(h, "TEXT")}' for h in headers)
+    # Include parent_index for easy querying of relationships
     cols += ', "parent_index" INTEGER'
     sql = f'CREATE TABLE IF NOT EXISTS "{table}" ({cols});'
     conn.execute(sql)
+
+
+def get_table_columns(conn: sqlite3.Connection, table: str) -> set:
+    """Return a set of column names for the given table."""
+    cur = conn.execute(f'PRAGMA table_info("{table}")')
+    return {row[1] for row in cur.fetchall()}
+
+
+def ensure_parent_index_column(conn: sqlite3.Connection, table: str):
+    """Ensure parent_index column exists; add it if missing."""
+    cols = get_table_columns(conn, table)
+    if 'parent_index' not in cols:
+        conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "parent_index" INTEGER')
+        conn.commit()
 
 
 def is_empty_row(row: List[str]) -> bool:
@@ -94,9 +108,13 @@ def is_parent_row(row: List[str]) -> bool:
 
 
 def insert_rows(conn: sqlite3.Connection, table: str, headers: List[str], column_types: Dict[str, str], rows_iter, batch_size: int = 1000):
-    # Add parent_index column to placeholders and columns
-    placeholders = ", ".join(["?"] * (len(headers) + 1))
-    cols_quoted = ", ".join([f'"{h}"' for h in headers]) + ', "parent_index"'
+    # Determine if parent_index exists to shape INSERT list
+    cols = get_table_columns(conn, table)
+    include_parent_index = 'parent_index' in cols
+    placeholders = ", ".join(["?"] * (len(headers) + (1 if include_parent_index else 0)))
+    cols_quoted = ", ".join([f'"{h}"' for h in headers])
+    if include_parent_index:
+        cols_quoted += ', "parent_index"'
     sql = f'INSERT INTO "{table}" ({cols_quoted}) VALUES ({placeholders})'
     batch: List[Tuple[Any, ...]] = []
     count = 0
@@ -111,13 +129,12 @@ def insert_rows(conn: sqlite3.Connection, table: str, headers: List[str], column
         
         # Check if this is an empty row (signals end of children)
         if is_empty_row(row):
+            # Reset parent tracking and skip inserting empty rows
             current_parent_index = None
-            # Skip inserting empty rows
             continue
         
-        # Check if this is a parent row
+        # If this is a parent row (index in first and last columns), set current parent
         if is_parent_row(row):
-            # Extract the parent index from the last column
             current_parent_index = extract_index_number(row[-1])
         
         # Convert values based on column types
@@ -125,7 +142,11 @@ def insert_rows(conn: sqlite3.Connection, table: str, headers: List[str], column
         for i, (h, val) in enumerate(zip(headers, row)):
             col_type = column_types.get(h, "TEXT")
             if not val or not val.strip():
-                converted_row.append(None)
+                # Special case: for the first "index" column of child rows, fill with current parent index
+                if h.lower() == "index" and current_parent_index is not None and not is_parent_row(row):
+                    converted_row.append(current_parent_index)
+                else:
+                    converted_row.append(None)
             elif col_type == "REAL":
                 try:
                     converted_row.append(float(val))
@@ -137,15 +158,13 @@ def insert_rows(conn: sqlite3.Connection, table: str, headers: List[str], column
                 converted_row.append(idx_num)
             else:
                 converted_row.append(val)
-        
-        # Add parent_index as the last value
-        # For parent rows, parent_index is NULL
-        # For child rows, parent_index is the current parent's index
-        if is_parent_row(row):
-            converted_row.append(None)  # Parent rows have no parent
-        else:
-            converted_row.append(current_parent_index)  # Child rows reference their parent
-        
+        # Append explicit parent_index column value if schema supports it
+        if include_parent_index:
+            if is_parent_row(row):
+                converted_row.append(None)
+            else:
+                converted_row.append(current_parent_index)
+
         batch.append(tuple(converted_row))
         if len(batch) >= batch_size:
             conn.executemany(sql, batch)
@@ -191,6 +210,8 @@ def main():
         column_types = infer_column_types(headers)
         
         create_table(conn, table, headers, column_types)
+        # If the table already existed, make sure parent_index column is present
+        ensure_parent_index_column(conn, table)
         total = insert_rows(conn, table, headers, column_types, reader, batch_size=args.batch)
         
         # Create useful indexes
