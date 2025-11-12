@@ -1,0 +1,86 @@
+#!/bin/bash
+# Quick query helper for gprof-cc SQLite database
+
+DB="/Users/gartung/Downloads/step3-29834.21.gprof-cc.sqlite"
+QUERY_SCRIPT="/Users/gartung/Downloads/query_gprof_db.py"
+
+show_help() {
+    cat << EOF
+Usage: $(basename "$0") [command] [options]
+
+Quick query commands:
+  top [N]           Show top N CPU consumers (default: 20)
+  search PATTERN    Search for functions matching PATTERN
+  stats             Show statistical summary
+  cycles            Show call cycles
+  self [THRESHOLD]  Show functions with self-time > THRESHOLD (default: 1.0)
+  children [N]      Show top N by children time (default: 15)
+  all               Run all standard queries
+  sql "QUERY"       Run custom SQL query
+  help              Show this help
+
+Examples:
+  $(basename "$0") top 10
+  $(basename "$0") search "edm::"
+  $(basename "$0") self 5.0
+  $(basename "$0") sql "SELECT COUNT(*) FROM gprof_cc WHERE cpu_time_total > 1"
+
+Direct sqlite3 access:
+  sqlite3 "$DB"
+EOF
+}
+
+if [ $# -eq 0 ]; then
+    show_help
+    exit 0
+fi
+
+case "$1" in
+    top)
+        N=${2:-20}
+        python3 "$QUERY_SCRIPT" "$DB" --top "$N"
+        ;;
+    search)
+        if [ -z "$2" ]; then
+            echo "Error: search requires a pattern"
+            exit 1
+        fi
+        python3 "$QUERY_SCRIPT" "$DB" --search "$2"
+        ;;
+    stats)
+        python3 "$QUERY_SCRIPT" "$DB" --stats
+        ;;
+    cycles)
+        python3 "$QUERY_SCRIPT" "$DB" --cycles
+        ;;
+    self)
+        THRESH=${2:-1.0}
+        python3 "$QUERY_SCRIPT" "$DB" --self-time "$THRESH"
+        ;;
+    children)
+        N=${2:-15}
+        python3 "$QUERY_SCRIPT" "$DB" --children "$N"
+        ;;
+    all)
+        python3 "$QUERY_SCRIPT" "$DB" --all
+        ;;
+    sql)
+        if [ -z "$2" ]; then
+            echo "Error: sql command requires a query string"
+            exit 1
+        fi
+        sqlite3 "$DB" "$2"
+        ;;
+    shell|sqlite)
+        sqlite3 "$DB"
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo ""
+        show_help
+        exit 1
+        ;;
+esac
