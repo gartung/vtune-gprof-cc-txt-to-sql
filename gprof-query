@@ -1,12 +1,33 @@
 #!/bin/bash
 # Quick query helper for gprof-cc SQLite database
 
-DB="/Users/gartung/Downloads/step3-29834.21.gprof-cc.sqlite"
-QUERY_SCRIPT="/Users/gartung/Downloads/query_gprof_db.py"
+# Default locations - can be overridden by environment variables
+DB="${GPROF_DB:-step3-29834.21.gprof-cc.sqlite}"
+QUERY_SCRIPT="${GPROF_QUERY_SCRIPT:-query_gprof_db.py}"
+
+# If DB is a relative path and doesn't exist, try script directory
+if [[ ! -f "$DB" && "$DB" != /* ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [[ -f "$SCRIPT_DIR/$DB" ]]; then
+        DB="$SCRIPT_DIR/$DB"
+    fi
+fi
+
+# Same for query script
+if [[ ! -f "$QUERY_SCRIPT" && "$QUERY_SCRIPT" != /* ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [[ -f "$SCRIPT_DIR/$QUERY_SCRIPT" ]]; then
+        QUERY_SCRIPT="$SCRIPT_DIR/$QUERY_SCRIPT"
+    fi
+fi
 
 show_help() {
     cat << EOF
 Usage: $(basename "$0") [command] [options]
+
+Environment variables:
+  GPROF_DB              Path to SQLite database (default: step3-29834.21.gprof-cc.sqlite)
+  GPROF_QUERY_SCRIPT    Path to query script (default: query_gprof_db.py)
 
 Quick query commands:
   top [N]           Show top N CPU consumers (default: 20)
@@ -16,6 +37,7 @@ Quick query commands:
   self [THRESHOLD]  Show functions with self-time > THRESHOLD (default: 1.0)
   children [N]      Show top N by children time (default: 15)
   all               Run all standard queries
+  parent PATTERN    Show parent(s) matching PATTERN with their children
   sql "QUERY"       Run custom SQL query
   help              Show this help
 
@@ -23,10 +45,18 @@ Examples:
   $(basename "$0") top 10
   $(basename "$0") search "edm::"
   $(basename "$0") self 5.0
+  $(basename "$0") parent "WorkerT"
   $(basename "$0") sql "SELECT COUNT(*) FROM gprof_cc WHERE cpu_time_total > 1"
+  
+  # Use a different database
+  GPROF_DB=/path/to/other.sqlite $(basename "$0") top 10
 
 Direct sqlite3 access:
   sqlite3 "$DB"
+
+Current configuration:
+  Database: $DB
+  Query script: $QUERY_SCRIPT
 EOF
 }
 
@@ -60,6 +90,13 @@ case "$1" in
     children)
         N=${2:-15}
         python3 "$QUERY_SCRIPT" "$DB" --children "$N"
+        ;;
+    parent)
+        if [ -z "$2" ]; then
+            echo "Error: parent command requires a pattern"
+            exit 1
+        fi
+        python3 "$QUERY_SCRIPT" "$DB" --parent "$2"
         ;;
     all)
         python3 "$QUERY_SCRIPT" "$DB" --all

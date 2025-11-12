@@ -194,6 +194,102 @@ def query_expensive_children(conn: sqlite3.Connection, limit: int = 15):
     )
 
 
+def query_parent_and_children(conn: sqlite3.Connection, pattern: str):
+    """Display parent functions matching pattern along with their children."""
+    print_section(f"Parents matching '{pattern}' with their children")
+    
+    # Check if parent_index column exists
+    cursor = conn.execute("PRAGMA table_info(gprof_cc)")
+    columns = {row[1] for row in cursor.fetchall()}
+    has_parent_index = 'parent_index' in columns
+    
+    # Find parent functions matching the pattern
+    if has_parent_index:
+        parent_query = """
+            SELECT DISTINCT "index", name, 
+                   ROUND(cpu_time_total, 2) as pct_total,
+                   ROUND(cpu_time_self, 2) as time_self,
+                   ROUND(cpu_time_children, 2) as time_children,
+                   ROUND(COALESCE(cpu_time_self, 0) + COALESCE(cpu_time_children, 0), 2) as total_time
+            FROM gprof_cc
+            WHERE parent_index IS NULL 
+              AND name LIKE ?
+            ORDER BY cpu_time_total DESC NULLS LAST
+        """
+    else:
+        parent_query = """
+            SELECT DISTINCT "index", name,
+                   ROUND(cpu_time_total, 2) as pct_total,
+                   ROUND(cpu_time_self, 2) as time_self,
+                   ROUND(cpu_time_children, 2) as time_children,
+                   ROUND(COALESCE(cpu_time_self, 0) + COALESCE(cpu_time_children, 0), 2) as total_time
+            FROM gprof_cc
+            WHERE "index" IS NOT NULL 
+              AND "index" = "index_1"
+              AND name LIKE ?
+            ORDER BY cpu_time_total DESC NULLS LAST
+        """
+    
+    cursor = conn.execute(parent_query, (f"%{pattern}%",))
+    parents = cursor.fetchall()
+    
+    if not parents:
+        print(f"(No parent functions matching '{pattern}')")
+        return
+    
+    # Track if we displayed any parents (ones with children)
+    displayed_count = 0
+    
+    for parent in parents:
+        parent_index, parent_name, pct_total, time_self, time_children, total_time = parent
+        
+        # Get children of this parent first to see if we should display this parent
+        if has_parent_index:
+            children_query = """
+                SELECT "index_1" as child_index, name,
+                       ROUND(cpu_time_total, 2) as pct_total,
+                       ROUND(cpu_time_self, 2) as time_self,
+                       ROUND(cpu_time_children, 2) as time_children,
+                       ROUND(COALESCE(cpu_time_self, 0) + COALESCE(cpu_time_children, 0), 2) as total_time
+                FROM gprof_cc
+                WHERE parent_index = ?
+                ORDER BY COALESCE(cpu_time_self, 0) + COALESCE(cpu_time_children, 0) DESC
+            """
+        else:
+            children_query = """
+                SELECT "index_1" as child_index, name,
+                       ROUND(cpu_time_total, 2) as pct_total,
+                       ROUND(cpu_time_self, 2) as time_self,
+                       ROUND(cpu_time_children, 2) as time_children,
+                       ROUND(COALESCE(cpu_time_self, 0) + COALESCE(cpu_time_children, 0), 2) as total_time
+                FROM gprof_cc
+                WHERE "index" = ? AND "index" != "index_1"
+                ORDER BY COALESCE(cpu_time_self, 0) + COALESCE(cpu_time_children, 0) DESC
+            """
+        
+        cursor = conn.execute(children_query, (parent_index,))
+        children = cursor.fetchall()
+        
+        # Only display parents that have children
+        if children:
+            displayed_count += 1
+            print(f"\n{'─' * 70}")
+            print(f"PARENT [{parent_index}]: {parent_name}")
+            print(f"  % Total: {pct_total if pct_total else 'N/A'}  |  Self: {time_self if time_self else 'N/A'}  |  Children: {time_children if time_children else 'N/A'}  |  Total: {total_time}")
+            print(f"{'─' * 70}")
+            
+            print("\nChildren:")
+            print_table(
+                ["Index", "Function Name", "% Total", "Self", "Children", "Total"],
+                children,
+                [8, 45, 10, 10, 10, 10]
+            )
+            print()  # Extra spacing between parent groups
+    
+    if displayed_count == 0:
+        print(f"(No parent functions matching '{pattern}' have children)")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Query and analyze gprof-cc SQLite database",
@@ -214,6 +310,7 @@ Examples:
     parser.add_argument("--stats", action="store_true", help="Show statistical summary")
     parser.add_argument("--cycles", action="store_true", help="Show call cycles")
     parser.add_argument("--children", type=int, metavar="N", help="Show top N functions by children time")
+    parser.add_argument("--parent", type=str, metavar="PATTERN", help="Show parent(s) matching pattern with their children")
     parser.add_argument("--table", type=str, default="gprof_cc", help="Table name (default: gprof_cc)")
     
     args = parser.parse_args()
@@ -231,7 +328,7 @@ Examples:
     try:
         # If no specific query specified, show defaults
         if not any([args.all, args.top, args.self_time, args.search, 
-                   args.stats, args.cycles, args.children]):
+                   args.stats, args.cycles, args.children, args.parent]):
             args.all = True
         
         if args.all:
@@ -251,6 +348,8 @@ Examples:
                 query_expensive_children(conn, limit=args.children)
             if args.search:
                 search_functions(conn, args.search)
+            if args.parent:
+                query_parent_and_children(conn, args.parent)
             if args.cycles:
                 query_cycles(conn)
         
